@@ -12,6 +12,7 @@ from app.models.project import Project
 from app.models.project_invitation import ProjectInvitation
 from app.models.project_member import MemberRole, ProjectMember
 from app.models.user import User
+from app.schemas.member import ProjectInvitationResponse
 from app.schemas.project import ProjectCreate, ProjectResponse
 from app.services.project_service import create_project, delete_project, get_project_by_id, list_user_projects
 from app.services.member_service import list_project_invitations
@@ -30,7 +31,9 @@ async def create_new_project(
     project_payload = ProjectResponse.model_validate(project).model_dump(mode="json")
     await broadcast_user_event(current_user.id, "project.created", project.id, project_payload)
     for invitation in await list_project_invitations(db, project.id):
-        await broadcast_user_event(invitation["invitee_id"], "invitation.received", project.id, invitation)
+        invitation_payload = ProjectInvitationResponse.model_validate(invitation).model_dump(mode="json")
+        await broadcast_user_event(invitation["invitee_id"], "invitation.received", project.id, invitation_payload)
+        await broadcast_user_event(current_user.id, "invitation.sent", project.id, invitation_payload)
     return project
 
 

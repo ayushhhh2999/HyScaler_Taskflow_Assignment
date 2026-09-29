@@ -55,9 +55,15 @@ async def test_unauthenticated_endpoint(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_project_with_member_ids_sends_pending_invitations(client: AsyncClient) -> None:
+async def test_create_project_with_member_ids_sends_pending_invitations(client: AsyncClient, monkeypatch: pytest.MonkeyPatch) -> None:
     owner_email = unique_email("owner")
     member_email = unique_email("member")
+    broadcasts = []
+
+    async def capture_broadcast(user_id, event_type, project_id, payload):
+        broadcasts.append((user_id, event_type, project_id, payload))
+
+    monkeypatch.setattr("app.routers.projects.broadcast_user_event", capture_broadcast)
 
     owner = await client.post(
         "/api/v1/auth/register",
@@ -82,6 +88,10 @@ async def test_create_project_with_member_ids_sends_pending_invitations(client: 
         headers=owner_headers,
     )
     assert project.status_code == 201, project.text
+
+    invitation_events = [event for event in broadcasts if event[1].startswith("invitation.")]
+    assert [event[1] for event in invitation_events] == ["invitation.received", "invitation.sent"]
+    assert all(isinstance(event[3]["created_at"], str) for event in invitation_events)
 
     project_id = project.json()["id"]
     pending = await client.get("/api/v1/invitations/me", headers=member_headers)
