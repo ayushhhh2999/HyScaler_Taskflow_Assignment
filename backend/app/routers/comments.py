@@ -56,9 +56,11 @@ async def add_comment(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not a member of this project")
     comment = await create_comment(db, task, current_user, payload.content)
     response = await serialize_comment(db, comment)
+    member_result = await db.execute(select(ProjectMember.user_id).where(ProjectMember.project_id == task.project_id))
     await broadcast_project_event(
         task.project_id,
         "comment.created",
         {"task_id": str(task.id), "comment": response.model_dump(mode="json")},
+        set(member_result.scalars().all()),
     )
     return response

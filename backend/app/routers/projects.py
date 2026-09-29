@@ -9,10 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_project_member, require_project_owner
 from app.models.project import Project
+from app.models.project_invitation import ProjectInvitation
 from app.models.project_member import MemberRole, ProjectMember
 from app.models.user import User
 from app.schemas.project import ProjectCreate, ProjectResponse
 from app.services.project_service import create_project, delete_project, get_project_by_id, list_user_projects
+from app.services.member_service import list_project_invitations
+from app.websocket.manager import broadcast_project_event, broadcast_user_event, manager
 
 router = APIRouter(prefix="/api/v1", tags=["projects"])
 
@@ -24,6 +27,10 @@ async def create_new_project(
     db: AsyncSession = Depends(get_db),
 ) -> Project:
     project = await create_project(db, current_user, payload.name, payload.description, payload.member_ids)
+    project_payload = ProjectResponse.model_validate(project).model_dump(mode="json")
+    await broadcast_user_event(current_user.id, "project.created", project.id, project_payload)
+    for invitation in await list_project_invitations(db, project.id):
+        await broadcast_user_event(invitation["invitee_id"], "invitation.received", project.id, invitation)
     return project
 
 
@@ -53,5 +60,12 @@ async def delete_project_route(
     project: Project = Depends(require_project_owner),
     db: AsyncSession = Depends(get_db),
 ) -> None:
+    member_result = await db.execute(select(ProjectMember.user_id).where(ProjectMember.project_id == project_id))
+    member_ids = set(member_result.scalars().all())
+    invitation_result = await db.execute(select(ProjectInvitation.invitee_id).where(ProjectInvitation.project_id == project_id))
+    member_ids.update(invitation_result.scalars().all())
+    project_payload = ProjectResponse.model_validate(project).model_dump(mode="json")
+    await broadcast_project_event(project_id, "project.deleted", project_payload, member_ids)
     await delete_project(db, project)
+    await manager.disconnect_project(project_id)
     return None

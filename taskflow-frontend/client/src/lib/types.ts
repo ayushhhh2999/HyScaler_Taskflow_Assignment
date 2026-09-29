@@ -43,6 +43,19 @@ export interface Member {
   email?: string | null;
 }
 
+export interface ProjectInvitation {
+  id: string;
+  project_id: string;
+  project_name: string;
+  inviter_id: string;
+  inviter_name?: string | null;
+  inviter_email: string;
+  invitee_id: string;
+  invitee_name?: string | null;
+  invitee_email: string;
+  created_at: string;
+}
+
 export interface Comment {
   id: string;
   task_id: string;

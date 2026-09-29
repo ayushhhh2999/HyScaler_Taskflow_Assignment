@@ -1,6 +1,7 @@
 from app.models.activity import Activity
 from app.models.comment import Comment
 from app.models.project import Project
+from app.models.project_invitation import ProjectInvitation
 from app.models.project_member import MemberRole, ProjectMember
 from app.models.refresh_token import RefreshToken
 from app.models.task import Task, TaskPriority, TaskStatus
@@ -11,6 +12,7 @@ __all__ = [
     "Comment",
     "MemberRole",
     "Project",
+    "ProjectInvitation",
     "ProjectMember",
     "RefreshToken",
     "Task",

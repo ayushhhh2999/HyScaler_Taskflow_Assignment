@@ -55,7 +55,7 @@ async def test_unauthenticated_endpoint(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_project_with_member_ids_adds_them_to_project(client: AsyncClient) -> None:
+async def test_create_project_with_member_ids_sends_pending_invitations(client: AsyncClient) -> None:
     owner_email = unique_email("owner")
     member_email = unique_email("member")
 
@@ -83,7 +83,19 @@ async def test_create_project_with_member_ids_adds_them_to_project(client: Async
     )
     assert project.status_code == 201, project.text
 
-    members = await client.get(f"/api/v1/projects/{project.json()['id']}/members", headers=owner_headers)
+    project_id = project.json()["id"]
+    pending = await client.get("/api/v1/invitations/me", headers=member_headers)
+    assert pending.status_code == 200
+    assert len(pending.json()) == 1
+    assert pending.json()[0]["project_id"] == project_id
+    denied = await client.get(f"/api/v1/projects/{project_id}", headers=member_headers)
+    assert denied.status_code == 403
+
+    invitation_id = pending.json()[0]["id"]
+    accept = await client.post(f"/api/v1/invitations/{invitation_id}/respond", json={"accept": True}, headers=member_headers)
+    assert accept.status_code == 200, accept.text
+
+    members = await client.get(f"/api/v1/projects/{project_id}/members", headers=owner_headers)
     assert members.status_code == 200
     emails = {item["email"] for item in members.json()}
     assert owner_email in emails
@@ -117,7 +129,16 @@ async def test_project_assignee_options_include_only_project_members(client: Asy
         json={"email": invited_email},
         headers=owner_headers,
     )
-    assert invite.status_code == 201, invite.text
+    assert invite.status_code == 202, invite.text
+
+    not_yet_member = await client.get(f"/api/v1/projects/{project_id}/assignee-options", headers=invited_headers)
+    assert not_yet_member.status_code == 403
+    accept = await client.post(
+        f"/api/v1/invitations/{invite.json()['id']}/respond",
+        json={"accept": True},
+        headers=invited_headers,
+    )
+    assert accept.status_code == 200, accept.text
 
     response = await client.get(f"/api/v1/projects/{project_id}/assignee-options", headers=invited_headers)
     assert response.status_code == 200
@@ -130,14 +151,15 @@ async def test_project_assignee_options_include_only_project_members(client: Asy
 
 
 @pytest.mark.asyncio
-async def test_invite_member_by_email_creates_membership(client: AsyncClient) -> None:
+async def test_invite_member_by_email_waits_for_acceptance(client: AsyncClient) -> None:
     owner_email = unique_email("owner")
     member_email = unique_email("member")
 
     owner = await client.post("/api/v1/auth/register", json={"name": "Owner", "email": owner_email, "password": "StrongPass1"})
     owner_headers = {"Authorization": f"Bearer {owner.json()['access_token']}"}
 
-    await client.post("/api/v1/auth/register", json={"name": "Member", "email": member_email, "password": "StrongPass1"})
+    member = await client.post("/api/v1/auth/register", json={"name": "Member", "email": member_email, "password": "StrongPass1"})
+    member_headers = {"Authorization": f"Bearer {member.json()['access_token']}"}
 
     project = await client.post("/api/v1/projects", json={"name": "Project by email", "description": "Test"}, headers=owner_headers)
     assert project.status_code == 201, project.text
@@ -148,13 +170,62 @@ async def test_invite_member_by_email_creates_membership(client: AsyncClient) ->
         json={"email": member_email},
         headers=owner_headers,
     )
-    assert response.status_code == 201, response.text
-    member_payload = response.json()
-    assert member_payload["email"] == member_email
+    assert response.status_code == 202, response.text
+    assert response.json()["invitee_email"] == member_email
 
     members = await client.get(f"/api/v1/projects/{project_id}/members", headers=owner_headers)
     assert members.status_code == 200
+    assert all(item["email"] != member_email for item in members.json())
+
+    pending = await client.get("/api/v1/invitations/me", headers=member_headers)
+    assert len(pending.json()) == 1
+    accept = await client.post(
+        f"/api/v1/invitations/{response.json()['id']}/respond",
+        json={"accept": True},
+        headers=member_headers,
+    )
+    assert accept.status_code == 200, accept.text
+    members = await client.get(f"/api/v1/projects/{project_id}/members", headers=owner_headers)
     assert any(item["email"] == member_email for item in members.json())
+
+
+@pytest.mark.asyncio
+async def test_rejecting_or_cancelling_invitation_never_grants_access(client: AsyncClient) -> None:
+    owner = await client.post("/api/v1/auth/register", json={"name": "Owner", "email": unique_email("owner"), "password": "StrongPass1"})
+    owner_headers = {"Authorization": f"Bearer {owner.json()['access_token']}"}
+    invitee_email = unique_email("invitee")
+    invitee = await client.post("/api/v1/auth/register", json={"name": "Invitee", "email": invitee_email, "password": "StrongPass1"})
+    invitee_headers = {"Authorization": f"Bearer {invitee.json()['access_token']}"}
+
+    project = await client.post("/api/v1/projects", json={"name": "Invitation response", "description": "Test"}, headers=owner_headers)
+    project_id = project.json()["id"]
+    rejected_invite = await client.post(
+        f"/api/v1/projects/{project_id}/members",
+        json={"email": invitee_email},
+        headers=owner_headers,
+    )
+    assert rejected_invite.status_code == 202, rejected_invite.text
+    reject = await client.post(
+        f"/api/v1/invitations/{rejected_invite.json()['id']}/respond",
+        json={"accept": False},
+        headers=invitee_headers,
+    )
+    assert reject.status_code == 200
+    assert (await client.get("/api/v1/invitations/me", headers=invitee_headers)).json() == []
+    assert (await client.get(f"/api/v1/projects/{project_id}", headers=invitee_headers)).status_code == 403
+
+    cancelled_invite = await client.post(
+        f"/api/v1/projects/{project_id}/members",
+        json={"email": (await client.get("/api/v1/auth/me", headers=invitee_headers)).json()["email"]},
+        headers=owner_headers,
+    )
+    assert cancelled_invite.status_code == 202
+    cancel = await client.delete(
+        f"/api/v1/projects/{project_id}/invitations/{cancelled_invite.json()['id']}",
+        headers=owner_headers,
+    )
+    assert cancel.status_code == 204
+    assert (await client.get("/api/v1/invitations/me", headers=invitee_headers)).json() == []
 
 
 @pytest.mark.asyncio
@@ -175,7 +246,9 @@ async def test_only_owner_can_delete_project(client: AsyncClient) -> None:
     project_id = project.json()["id"]
 
     invite = await client.post(f"/api/v1/projects/{project_id}/members", json={"email": member_email}, headers=owner_headers)
-    assert invite.status_code == 201, invite.text
+    assert invite.status_code == 202, invite.text
+    accept = await client.post(f"/api/v1/invitations/{invite.json()['id']}/respond", json={"accept": True}, headers=member_headers)
+    assert accept.status_code == 200, accept.text
 
     non_owner_delete = await client.delete(f"/api/v1/projects/{project_id}", headers=member_headers)
     assert non_owner_delete.status_code == 403
@@ -208,7 +281,9 @@ async def test_member_removal_keeps_created_tasks_and_blocks_owner_removal(clien
     project_id = project.json()["id"]
 
     invite = await client.post(f"/api/v1/projects/{project_id}/members", json={"email": member_email}, headers=owner_headers)
-    assert invite.status_code == 201, invite.text
+    assert invite.status_code == 202, invite.text
+    accept = await client.post(f"/api/v1/invitations/{invite.json()['id']}/respond", json={"accept": True}, headers=member_headers)
+    assert accept.status_code == 200, accept.text
 
     task = await client.post(
         f"/api/v1/projects/{project_id}/tasks",
@@ -249,7 +324,9 @@ async def test_project_member_can_update_task_status(client: AsyncClient) -> Non
     project_id = project.json()["id"]
 
     invite = await client.post(f"/api/v1/projects/{project_id}/members", json={"email": member_email}, headers=owner_headers)
-    assert invite.status_code == 201, invite.text
+    assert invite.status_code == 202, invite.text
+    accept = await client.post(f"/api/v1/invitations/{invite.json()['id']}/respond", json={"accept": True}, headers=member_headers)
+    assert accept.status_code == 200, accept.text
 
     task = await client.post(
         f"/api/v1/projects/{project_id}/tasks",
@@ -285,7 +362,9 @@ async def test_project_member_can_create_and_list_comments(client: AsyncClient) 
     project_id = project.json()["id"]
 
     invite = await client.post(f"/api/v1/projects/{project_id}/members", json={"email": member_email}, headers=owner_headers)
-    assert invite.status_code == 201, invite.text
+    assert invite.status_code == 202, invite.text
+    accept = await client.post(f"/api/v1/invitations/{invite.json()['id']}/respond", json={"accept": True}, headers=member_headers)
+    assert accept.status_code == 200, accept.text
 
     task = await client.post(
         f"/api/v1/projects/{project_id}/tasks",

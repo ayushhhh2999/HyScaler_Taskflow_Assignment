@@ -5,6 +5,7 @@ import type {
   Member,
   Project,
   ProjectCreateInput,
+  ProjectInvitation,
   Task,
   TaskCreateInput,
   TaskPriority,
@@ -71,6 +72,20 @@ async function refreshAccessToken() {
       });
   }
   return refreshInFlight;
+}
+
+export async function getWebSocketAccessToken() {
+  if (!accessToken) return null;
+  try {
+    const payloadPart = accessToken.split(".")[1];
+    if (!payloadPart) return refreshAccessToken();
+    const normalizedPayload = payloadPart.replace(/-/g, "+").replace(/_/g, "/");
+    const payload = JSON.parse(atob(normalizedPayload)) as { exp?: number };
+    if (!payload.exp || payload.exp * 1000 <= Date.now() + 30_000) return refreshAccessToken();
+    return accessToken;
+  } catch {
+    return refreshAccessToken();
+  }
 }
 
 async function request<T>(path: string, init: RequestInit = {}, retry = true): Promise<T> {
@@ -141,9 +156,12 @@ export const api = {
     createTask: (projectId: string, payload: TaskCreateInput) =>
       request<Task>(`/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify(payload) }),
     members: (projectId: string) => request<Member[]>(`/projects/${projectId}/members`),
+    invitations: (projectId: string) => request<ProjectInvitation[]>(`/projects/${projectId}/invitations`),
     assigneeOptions: (projectId: string) => request<User[]>(`/projects/${projectId}/assignee-options`),
     inviteMember: (projectId: string, payload: { user_id?: string; email?: string }) =>
-      request<Member>(`/projects/${projectId}/members`, { method: "POST", body: JSON.stringify(payload) }),
+      request<ProjectInvitation>(`/projects/${projectId}/members`, { method: "POST", body: JSON.stringify(payload) }),
+    cancelInvitation: (projectId: string, invitationId: string) =>
+      request<void>(`/projects/${projectId}/invitations/${invitationId}`, { method: "DELETE" }),
     removeMember: (projectId: string, userId: string) =>
       request<void>(`/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
   },
@@ -158,5 +176,13 @@ export const api = {
     comments: (taskId: string) => request<Comment[]>(`/tasks/${taskId}/comments`),
     addComment: (taskId: string, content: string) =>
       request<Comment>(`/tasks/${taskId}/comments`, { method: "POST", body: JSON.stringify({ content }) }),
+  },
+  invitations: {
+    list: () => request<ProjectInvitation[]>("/invitations/me"),
+    respond: (invitationId: string, accept: boolean) =>
+      request<{ status: "accepted" | "rejected"; invitation_id: string; project_id: string; member: Member | null }>(
+        `/invitations/${invitationId}/respond`,
+        { method: "POST", body: JSON.stringify({ accept }) },
+      ),
   },
 };

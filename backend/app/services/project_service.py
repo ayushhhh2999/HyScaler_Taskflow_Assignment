@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.activity import Activity
 from app.models.project import Project
+from app.models.project_invitation import ProjectInvitation
 from app.models.project_member import MemberRole, ProjectMember
 from app.models.user import User
 from app.services.activity_service import build_activity_message
@@ -34,11 +35,11 @@ async def create_project(db: AsyncSession, owner: User, name: str, description: 
     db.add(project)
     await db.flush()
 
-    memberships = [ProjectMember(project_id=project.id, user_id=owner.id, role=MemberRole.owner)]
-    for user_id in member_ids:
-        memberships.append(ProjectMember(project_id=project.id, user_id=user_id, role=MemberRole.member))
-
-    db.add_all(memberships)
+    db.add(ProjectMember(project_id=project.id, user_id=owner.id, role=MemberRole.owner))
+    db.add_all(
+        ProjectInvitation(project_id=project.id, inviter_id=owner.id, invitee_id=user_id)
+        for user_id in member_ids
+    )
     activity = Activity(
         project_id=project.id,
         user_id=owner.id,

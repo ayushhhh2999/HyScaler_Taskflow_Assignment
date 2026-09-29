@@ -18,10 +18,10 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
-import type { Member, Project, Task, TaskPriority, TaskStatus, User } from "@/lib/types";
+import type { Member, Project, ProjectInvitation, Task, TaskPriority, TaskStatus, User } from "@/lib/types";
 import { EmptyTaskState, KanbanCard } from "@/components/TaskComponents";
 import { TaskDetailModal } from "@/components/TaskDetailModal";
-import { useProjectSocket, type ProjectSocketEvent } from "@/hooks/useProjectSocket";
+import { useProjectSocket, useUserSocket, type ProjectSocketEvent } from "@/hooks/useProjectSocket";
 
 const tabs = ["Tasks", "Members"] as const;
 type ProjectTab = (typeof tabs)[number];
@@ -47,6 +47,7 @@ export function ProjectDetailPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [members, setMembers] = useState<Member[]>([]);
+  const [pendingInvitations, setPendingInvitations] = useState<ProjectInvitation[]>([]);
   const [assigneeOptions, setAssigneeOptions] = useState<User[]>([]);
   const [availableUsers, setAvailableUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,6 +79,11 @@ export function ProjectDetailPage() {
       setMembers(membersResponse);
       setAssigneeOptions(assigneeResponse);
       setAvailableUsers(usersResponse);
+      if (projectResponse.owner_id === user?.id) {
+        setPendingInvitations(await api.projects.invitations(projectId).catch(() => [] as ProjectInvitation[]));
+      } else {
+        setPendingInvitations([]);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to load this project.");
     } finally {
@@ -90,6 +96,29 @@ export function ProjectDetailPage() {
   }, [projectId]);
 
   const handleSocketEvent = useCallback((event: ProjectSocketEvent) => {
+    if (event.type === "project.deleted") {
+      navigate("/projects", { replace: true });
+      return;
+    }
+    if (event.type === "invitation.sent" && event.project_id === projectId) {
+      setPendingInvitations((current) => current.some((item) => item.id === event.payload.id) ? current : [...current, event.payload]);
+      return;
+    }
+    if (event.type === "invitation.cancelled" && event.project_id === projectId) {
+      setPendingInvitations((current) => current.filter((item) => item.id !== event.payload.id));
+      return;
+    }
+    if ((event.type === "invitation.accepted" || event.type === "invitation.rejected") && event.project_id === projectId) {
+      setPendingInvitations((current) => current.filter((item) => item.id !== event.payload.invitation.id));
+      if (event.type === "invitation.accepted") {
+        const acceptedMember = event.payload.member;
+        setMembers((current) => current.some((item) => item.user_id === acceptedMember.user_id) ? current : [...current, acceptedMember]);
+        setAssigneeOptions((current) => current.some((item) => item.id === acceptedMember.user_id)
+          ? current
+          : [...current, { id: acceptedMember.user_id, name: acceptedMember.name || "", email: acceptedMember.email || "" }]);
+      }
+      return;
+    }
     if (event.type === "task.created" || event.type === "task.updated" || event.type === "task.status_changed") {
       setTasks((current) => upsertTask(current, event.payload));
       setSelectedTask((current) => (current?.id === event.payload.id ? event.payload : current));
@@ -129,9 +158,16 @@ export function ProjectDetailPage() {
         ),
       );
     }
-  }, []);
+  }, [navigate, projectId, user?.id]);
+
+  const handleAccessRevoked = useCallback((event: ProjectSocketEvent) => {
+    if (event.type === "project.member_removed" && event.project_id === projectId && event.payload.user_id === user?.id) {
+      navigate("/projects", { replace: true });
+    }
+  }, [navigate, projectId, user?.id]);
 
   useProjectSocket(projectId, handleSocketEvent);
+  useUserSocket(handleAccessRevoked);
 
   const visibleTasks = useMemo(
     () =>
@@ -190,6 +226,16 @@ export function ProjectDetailPage() {
       setAssigneeOptions((current) => current.filter((option) => option.id !== userId));
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Unable to remove member.");
+    }
+  }
+
+  async function cancelInvitation(invitationId: string) {
+    if (!projectId || !window.confirm("Cancel this pending invitation?")) return;
+    try {
+      await api.projects.cancelInvitation(projectId, invitationId);
+      setPendingInvitations((current) => current.filter((invitation) => invitation.id !== invitationId));
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unable to cancel invitation.");
     }
   }
 
@@ -398,9 +444,11 @@ export function ProjectDetailPage() {
         <MembersPanel
           isOwner={isProjectOwner}
           members={members}
+          pendingInvitations={pendingInvitations}
           ownerId={project.owner_id}
           onInvite={() => setShowInvite(true)}
           onRemoveMember={removeMember}
+          onCancelInvitation={cancelInvitation}
         />
       )}
 
@@ -420,12 +468,8 @@ export function ProjectDetailPage() {
           candidates={inviteCandidates}
           projectId={projectId}
           onClose={() => setShowInvite(false)}
-          onInvited={(member) => {
-            setMembers((current) => [...current, member]);
-            setAssigneeOptions((current) => {
-              if (current.some((option) => option.id === member.user_id)) return current;
-              return [...current, { id: member.user_id, name: member.name || "", email: member.email || "" }];
-            });
+          onInvited={(invitation) => {
+            setPendingInvitations((current) => current.some((item) => item.id === invitation.id) ? current : [...current, invitation]);
             setShowInvite(false);
           }}
         />
@@ -451,16 +495,20 @@ export function ProjectDetailPage() {
 
 function MembersPanel({
   members,
+  pendingInvitations,
   ownerId,
   isOwner,
   onInvite,
   onRemoveMember,
+  onCancelInvitation,
 }: {
   members: Member[];
+  pendingInvitations: ProjectInvitation[];
   ownerId: string;
   isOwner: boolean;
   onInvite: () => void;
   onRemoveMember: (userId: string) => void;
+  onCancelInvitation: (invitationId: string) => void;
 }) {
   return (
     <section className="workspace-panel members-panel">
@@ -493,7 +541,7 @@ function MembersPanel({
             </div>
           ))}
         </div>
-      ) : (
+      ) : pendingInvitations.length === 0 ? (
         <div className="empty-large compact">
           <span className="empty-state-icon">
             <Users size={20} />
@@ -505,6 +553,27 @@ function MembersPanel({
               <UserPlus size={15} /> Invite member
             </button>
           )}
+        </div>
+      ) : null}
+      {pendingInvitations.length > 0 && (
+        <div className="pending-invitations">
+          <div className="pending-invitations-heading">
+            <h3>Pending invitations</h3>
+            <span>{pendingInvitations.length}</span>
+          </div>
+          <div className="member-list">
+            {pendingInvitations.map((invitation) => (
+              <div className="member-row" key={invitation.id}>
+                <span className="member-avatar">{(invitation.invitee_name || invitation.invitee_email).slice(0, 2).toUpperCase()}</span>
+                <div>
+                  <strong>{invitation.invitee_name || invitation.invitee_email}</strong>
+                  <span>{invitation.invitee_email}</span>
+                </div>
+                <span className="role-pill pending-role">Pending</span>
+                {isOwner && <button className="danger-text-button" type="button" onClick={() => onCancelInvitation(invitation.id)}>Cancel</button>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </section>
@@ -661,7 +730,7 @@ function InviteMemberModal({
   projectId: string;
   candidates: User[];
   onClose: () => void;
-  onInvited: (member: Member) => void;
+  onInvited: (invitation: ProjectInvitation) => void;
 }) {
   const [query, setQuery] = useState("");
   const [selectedEmail, setSelectedEmail] = useState("");

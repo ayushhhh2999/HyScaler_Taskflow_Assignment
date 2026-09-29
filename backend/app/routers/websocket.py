@@ -17,6 +17,7 @@ router = APIRouter(prefix="/ws", tags=["websocket"])
 async def websocket_endpoint(websocket: WebSocket, project_id: UUID):
     token = websocket.query_params.get("token")
     if not token:
+        await websocket.accept()
         await websocket.close(code=1008)
         return
 
@@ -29,6 +30,7 @@ async def websocket_endpoint(websocket: WebSocket, project_id: UUID):
             raise ValueError("Missing subject")
         member_user_id = UUID(str(user_id))
     except Exception:
+        await websocket.accept()
         await websocket.close(code=1008)
         return
 
@@ -40,11 +42,12 @@ async def websocket_endpoint(websocket: WebSocket, project_id: UUID):
             )
         )
         if membership.scalar_one_or_none() is None:
+            await websocket.accept()
             await websocket.close(code=1008)
             return
         break
 
-    await manager.connect(websocket, project_id)
+    await manager.connect(websocket, project_id, member_user_id)
     try:
         while True:
             await websocket.receive_text()
@@ -52,3 +55,31 @@ async def websocket_endpoint(websocket: WebSocket, project_id: UUID):
         manager.disconnect(websocket, project_id)
     except Exception:
         manager.disconnect(websocket, project_id)
+
+
+@router.websocket("/users")
+async def user_websocket_endpoint(websocket: WebSocket):
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.accept()
+        await websocket.close(code=1008)
+        return
+
+    try:
+        payload = decode_token(token)
+        if payload.get("type") != "access":
+            raise ValueError("Invalid token type")
+        user_id = UUID(str(payload["sub"]))
+    except Exception:
+        await websocket.accept()
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect_user(websocket, user_id)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect_user(websocket, user_id)
+    except Exception:
+        manager.disconnect_user(websocket, user_id)

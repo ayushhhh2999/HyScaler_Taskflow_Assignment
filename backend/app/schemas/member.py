@@ -23,3 +23,27 @@ class ProjectMemberResponse(BaseModel):
     name: str | None = None
     email: str | None = None
     model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectInvitationResponse(BaseModel):
+    id: UUID
+    project_id: UUID
+    project_name: str
+    inviter_id: UUID
+    inviter_name: str | None = None
+    inviter_email: str
+    invitee_id: UUID
+    invitee_name: str | None = None
+    invitee_email: str
+    created_at: datetime
+
+
+class InvitationRespond(BaseModel):
+    accept: bool
+
+
+class InvitationRespondResponse(BaseModel):
+    status: str
+    invitation_id: UUID
+    project_id: UUID
+    member: ProjectMemberResponse | None = None

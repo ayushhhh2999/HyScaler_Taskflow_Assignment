@@ -28,6 +28,11 @@ async def _require_task_membership(db: AsyncSession, task: Task, user: User) -> 
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="You are not a member of this project")
 
 
+async def _project_member_ids(db: AsyncSession, project_id: UUID) -> set[UUID]:
+    result = await db.execute(select(ProjectMember.user_id).where(ProjectMember.project_id == project_id))
+    return set(result.scalars().all())
+
+
 @router.post("/projects/{project_id}/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
 async def create_new_task(
     project_id: UUID,
@@ -38,7 +43,7 @@ async def create_new_task(
 ) -> TaskResponse:
     task = await create_task(db, project, current_user, payload)
     response = await serialize_task(db, task)
-    await broadcast_project_event(project.id, "task.created", response.model_dump(mode="json"))
+    await broadcast_project_event(project.id, "task.created", response.model_dump(mode="json"), await _project_member_ids(db, project.id))
     return response
 
 
@@ -103,7 +108,7 @@ async def update_existing_task(
     await _require_task_membership(db, task, current_user)
     updated = await update_task(db, task, payload, current_user)
     response = await serialize_task(db, updated)
-    await broadcast_project_event(updated.project_id, "task.updated", response.model_dump(mode="json"))
+    await broadcast_project_event(updated.project_id, "task.updated", response.model_dump(mode="json"), await _project_member_ids(db, updated.project_id))
     return response
 
 
@@ -120,7 +125,7 @@ async def delete_existing_task(
     project_id = task.project_id
     deleted_id = str(task.id)
     await delete_task(db, task)
-    await broadcast_project_event(project_id, "task.deleted", {"id": deleted_id})
+    await broadcast_project_event(project_id, "task.deleted", {"id": deleted_id}, await _project_member_ids(db, project_id))
     return None
 
 
@@ -137,5 +142,5 @@ async def update_task_status(
     await _require_task_membership(db, task, current_user)
     updated = await patch_task_status(db, task, current_user, payload.status)
     response = await serialize_task(db, updated)
-    await broadcast_project_event(updated.project_id, "task.status_changed", response.model_dump(mode="json"))
+    await broadcast_project_event(updated.project_id, "task.status_changed", response.model_dump(mode="json"), await _project_member_ids(db, updated.project_id))
     return response

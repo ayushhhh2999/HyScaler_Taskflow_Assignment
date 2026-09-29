@@ -6,6 +6,7 @@ import { api } from "@/lib/api";
 import type { DashboardSummary, Project, User } from "@/lib/types";
 import { formatRelativeTime, StatCard } from "@/components/TaskComponents";
 import { useAuth } from "@/contexts/AuthContext";
+import { useUserSocket, type ProjectSocketEvent } from "@/hooks/useProjectSocket";
 
 function LoadingBlock() {
   return <div className="loading-page"><div className="loader-ring" /><p>Loading your workspace…</p></div>;
@@ -26,6 +27,21 @@ export function DashboardPage() {
     finally { setLoading(false); }
   }
   useEffect(() => { void load(); }, []);
+  useUserSocket((event: ProjectSocketEvent) => {
+    if (event.type === "project.created") {
+      setProjects((current) => current.some((project) => project.id === event.payload.id) ? current : [event.payload, ...current]);
+      setSummary((current) => current ? { ...current, project_count: current.project_count + 1 } : current);
+      return;
+    }
+    if (event.type === "project.deleted") {
+      setProjects((current) => current.filter((project) => project.id !== event.payload.id));
+      setSummary((current) => current ? { ...current, project_count: Math.max(0, current.project_count - 1) } : current);
+      return;
+    }
+    void Promise.all([api.dashboard(), api.projects.list()])
+      .then(([dashboard, projectList]) => { setSummary(dashboard); setProjects(projectList); })
+      .catch(() => undefined);
+  });
 
   if (loading) return <LoadingBlock />;
   if (error || !summary) return <ErrorPanel message={error || "No dashboard data available."} onRetry={load} />;
@@ -74,6 +90,17 @@ export function ProjectsPage() {
   }
 
   useEffect(() => { void load(); void loadAvailableMembers(); const shouldOpen = new URLSearchParams(window.location.search).get("new") === "1"; if (shouldOpen) setShowCreate(true); }, []);
+  useUserSocket((event: ProjectSocketEvent) => {
+    if (event.type === "project.created") {
+      setProjects((current) => current.some((project) => project.id === event.payload.id) ? current : [event.payload, ...current]);
+      return;
+    }
+    if (event.type === "project.deleted") {
+      setProjects((current) => current.filter((project) => project.id !== event.payload.id));
+      return;
+    }
+    void api.projects.list().then(setProjects).catch((cause) => setError(cause instanceof Error ? cause.message : "Unable to refresh projects."));
+  });
   const filtered = useMemo(() => projects.filter((project) => `${project.name} ${project.description || ""}`.toLowerCase().includes(search.toLowerCase())), [projects, search]);
   const filteredMembers = useMemo(() => {
     const query = memberQuery.trim().toLowerCase();
